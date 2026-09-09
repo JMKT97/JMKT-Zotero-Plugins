@@ -63,6 +63,11 @@ jobs:
       # regardless of this setting, so it's been patched to no-op when signing is disabled.
       # SideStore performs the actual free/Personal-Team signing step at install time.
       - name: Build unsigned .app
+        env:
+          # The project's SwiftLint script phase already supports this skip - see its
+          # shellScript in project.pbxproj. This is a personal sideload build, not code
+          # under review, so Zotero's house lint style isn't worth enforcing here.
+          SKIP_SWIFTLINT: "1"
         run: |
           xcodebuild build \
             -project Zotero.xcodeproj \
