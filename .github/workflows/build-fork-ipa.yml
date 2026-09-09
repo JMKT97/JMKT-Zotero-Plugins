@@ -56,12 +56,13 @@ jobs:
       # No Apple Developer account and no PSPDFKit license key are configured, by design
       # (see SPEC.md). The project's own build settings hardcode Automatic signing tied
       # to Zotero's own team (DEVELOPMENT_TEAM = 8LAYR367YV), which we have no access to,
-      # and a truly empty CODE_SIGN_IDENTITY breaks the project's own "Fix Code Signing"
-      # script phase (it unconditionally re-codesigns embedded frameworks and fails with
-      # an empty identity). Ad-hoc signing ("-") needs no certificate or team and satisfies
-      # both. SideStore replaces this signature with real free/Personal-Team signing at
-      # install time, so it only needs to get us past this build.
-      - name: Build ad-hoc-signed .app
+      # so signing is disabled outright. Ad-hoc signing ("-") was tried instead, but Apple's
+      # iOS SDK hard-blocks ad-hoc signing for device builds ("Ad Hoc code signing is not
+      # allowed with SDK 'iOS ...'"). The project's own "Fix Code Signing" script phase
+      # (Zotero.xcodeproj/project.pbxproj) unconditionally re-codesigns embedded frameworks
+      # regardless of this setting, so it's been patched to no-op when signing is disabled.
+      # SideStore performs the actual free/Personal-Team signing step at install time.
+      - name: Build unsigned .app
         run: |
           xcodebuild build \
             -project Zotero.xcodeproj \
@@ -69,12 +70,9 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY=- \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER=""
+            CODE_SIGN_IDENTITY=""
 
       - name: Package .ipa
         id: package
