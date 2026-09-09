@@ -10,7 +10,7 @@ This map's destination is a complete, buildable **spec** — a plan precise enou
 
 ## Notes
 
-Domain: iOS app development (Swift/UIKit/Xcode), Zotero's data model and sync protocol, Apple code-signing/sideloading ecosystem. See [CONTEXT.md](../CONTEXT.md) for the project glossary, and [docs/adr/](../docs/adr/) (0001-0003) for the architectural decisions already locked in during destination-naming: forking instead of a plugin or jailbreak, the Mac-free/free-tier build pipeline, and local-only annotation persistence.
+Domain: iOS app development (Swift/UIKit/Xcode), Zotero's data model and sync protocol, Apple code-signing/sideloading ecosystem. See [CONTEXT.md](../CONTEXT.md) for the project glossary, and [docs/adr/](../docs/adr/) (0001-0004) for the architectural decisions locked in while charting this map: forking instead of a plugin or jailbreak, the Mac-free/free-tier build pipeline, local-only annotation persistence, and rebasing the Fork onto Upstream releases.
 
 Standing constraints: no Mac or Apple hardware beyond the iPad itself; no paid Apple Developer account; all other dev machines are Linux.
 
@@ -22,10 +22,13 @@ This map does **not** carry execution — resolving a ticket means making a deci
 
 - [Determine SideStore's custom app-source format and update behavior](tickets/sidestore-source-format-research.md): no fully hands-off updates — SideStore only auto-refreshes the 7-day signing expiry on what's already installed; a new build always needs a manual tap in the SideStore app. Source format is classic AltStore/AltSource JSON (`name`/`identifier`/`apps[].bundleIdentifier` + `versions[]` with `version`/`date`/`downloadURL`/`size`, no `sha256`).
 - [Determine whether PSPDFKit's trial-mode limitations require removing it from the Fork](tickets/pspdfkit-trial-mode-research.md): PSPDFKit is initialized eagerly in `AppDelegate.swift` on every launch regardless of reader use, and its evaluation mode triggers on any SDK API use (not on presenting its UI), time-limiting the whole app to 1 hour once triggered. So `AppDelegate.swift`'s ~10 lines of eager SDK calls must be stripped/neutralized either way — but once that's done, the rest of PSPDFKit's dependency and unreached reader-scene code (~48 files) can safely stay in the tree.
+- [Decide whether to strip PSPDFKit from the Fork entirely or leave it dormant](tickets/pspdfkit-strip-or-dormant.md): leave the ~48 dormant reader-scene files untouched; only neutralize `AppDelegate.swift`'s eager SDK calls. Keeps the patch's PSPDFKit footprint to one file, so future rebases against Upstream's ongoing PSPDFKit-related changes merge silently with no conflicts.
+- [Decide the Fork's git workflow for tracking Upstream](tickets/fork-maintenance-git-workflow.md): add Zotero's repo as an `upstream` remote; keep the patch on one branch periodically rebased onto Upstream's latest tag, then force-pushed. Chosen over merging (which would avoid force-push) because a clean, always-diffable patch was valued more; see [ADR-0004](../docs/adr/0004-rebase-fork-onto-upstream-releases.md).
+- [Decide whether to hide or leave dormant Zotero's own Annotations UI](tickets/zotero-annotations-ui-handling.md): leave it dormant, untouched — an always-empty list is cosmetic, not functional, so it doesn't earn a diff, and its jump-to-PDF action likely already routes through the intercepted `show(attachment:...)` path. Flagged for implementation to verify that routing assumption.
 
 ## Not yet specified
 
-- Any follow-on tooling to apply the git workflow chosen in [Decide the Fork's git workflow for tracking Upstream](tickets/fork-maintenance-git-workflow.md) (e.g. automation to check for or apply new Upstream releases).
+- Any follow-on tooling to actually run the rebase-onto-Upstream workflow decided above (e.g. automation to check for new Upstream releases, rather than doing it by hand).
 
 ## Out of scope
 
