@@ -1,0 +1,24 @@
+[submodule "bundled-styles"]
+	path = bundled-styles
+	url = https://github.com/zotero/bundled-styles/
+[submodule "locales"]
+	path = locales
+	url = https://github.com/citation-style-language/locales.git
+[submodule "ZShare/Assets/translation/translate"]
+	path = ZShare/Assets/translation/translate
+	url = https://github.com/zotero/translate.git
+[submodule "translators"]
+	path = translators
+	url = https://github.com/zotero/translators.git
+[submodule "note-editor"]
+	path = note-editor
+	url = https://github.com/zotero/note-editor
+[submodule "utilities"]
+	path = utilities
+	url = https://github.com/zotero/utilities.git
+[submodule "reader"]
+	path = reader
+	url = https://github.com/zotero/reader.git
+[submodule "document-worker"]
+	path = document-worker
+	url = https://github.com/zotero/document-worker

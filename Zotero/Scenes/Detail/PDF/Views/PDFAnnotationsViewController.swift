@@ -1,0 +1,676 @@
+//
+//  PDFAnnotationsViewController.swift
+//  Zotero
+//
+//  Created by Michal Rentka on 24/04/2020.
+//  Copyright © 2020 Corporation for Digital Scholarship. All rights reserved.
+//
+
+import UIKit
+
+import CocoaLumberjackSwift
+import PSPDFKit
+import PSPDFKitUI
+import RxSwift
+
+typealias AnnotationsViewControllerAction = (AnnotationView.Action, Annotation, UIButton) -> Void
+
+final class PDFAnnotationsViewController: UIViewController {
+    private static let cellId = "AnnotationCell"
+    private let viewModel: ViewModel<PDFAnnotationsActionHandler>
+    private let previewHandler: PDFAnnotationsPreviewHandler
+    private let updateQueue: DispatchQueue
+    private let disposeBag: DisposeBag
+
+    private weak var emptyLabel: UILabel!
+    private weak var tableView: UITableView!
+    private weak var toolbarContainer: UIView!
+    private weak var toolbar: UIToolbar!
+    private var tableViewToToolbar: NSLayoutConstraint!
+    private var tableViewToBottom: NSLayoutConstraint!
+    private weak var deleteBarButton: UIBarButtonItem?
+    private weak var mergeBarButton: UIBarButtonItem?
+    private var dataSource: TableViewDiffableDataSource<Int, PDFReaderAnnotationKey>!
+    private var didAppear = false
+
+    weak var parentDelegate: (PDFReaderContainerDelegate & PDFSidebarDelegate & ReaderAnnotationsDelegate)?
+    weak var coordinatorDelegate: PdfAnnotationsCoordinatorDelegate?
+    weak var boundingBoxConverter: AnnotationBoundingBoxConverter?
+
+    // MARK: - Lifecycle
+
+    init(
+        viewModel: ViewModel<PDFAnnotationsActionHandler>,
+        annotationProvider: PDFReaderAnnotationProvider?,
+        annotationPreviewController: AnnotationPreviewController,
+        initialAppearance: Appearance
+    ) {
+        self.viewModel = viewModel
+        previewHandler = PDFAnnotationsPreviewHandler(
+            annotationPreviewController: annotationPreviewController,
+            annotationProvider: annotationProvider,
+            attachmentKey: viewModel.state.key,
+            libraryId: viewModel.state.library.identifier,
+            appearance: initialAppearance
+        )
+        disposeBag = DisposeBag()
+        updateQueue = DispatchQueue(label: "org.zotero.PDFAnnotationsViewController.UpdateQueue")
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        definesPresentationContext = true
+        setupViews()
+        setupToolbar(to: viewModel.state)
+        setupDataSource()
+        setupSearchController(text: viewModel.state.searchTerm)
+        previewHandler.previewsDidLoad = { [weak self] keys in
+            self?.updatePreviewsIfVisible(for: keys)
+        }
+    }
+
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+
+        tableView.setEditing(viewModel.state.sidebarEditingEnabled, animated: false)
+        updateUI(state: viewModel.state, animatedDifferences: false) { [weak self] in
+            guard let self, viewModel.state.focusOnSelectionIfNeeded, let key = viewModel.state.selectedAnnotationKey, let indexPath = dataSource.indexPath(for: key) else { return }
+            tableView.selectRow(at: indexPath, animated: false, scrollPosition: .middle)
+        }
+
+        if !didAppear {
+            didAppear = true
+            setupToolbar(to: viewModel.state)
+        }
+        viewModel.stateObservable
+            .observe(on: MainScheduler.instance)
+            .subscribe(onNext: { [weak self] state in
+                self?.update(state: state)
+            })
+            .disposed(by: disposeBag)
+
+        NotificationCenter.default.rx
+            .notification(UIApplication.didBecomeActiveNotification)
+            .observe(on: MainScheduler.instance)
+            .subscribe(onNext: { [weak self] _ in
+                self?.refreshVisibleAndPrefetchPreviews()
+            })
+            .disposed(by: disposeBag)
+        previewHandler.startObserving()
+        refreshVisibleAndPrefetchPreviews()
+    }
+
+    deinit {
+        DDLogInfo("AnnotationsViewController deinitialized")
+    }
+
+    // MARK: - Actions
+
+    private func perform(action: AnnotationView.Action, annotationKey: PDFReaderAnnotationKey) {
+        guard viewModel.state.library.metadataEditable, let annotation = viewModel.state.annotation(for: annotationKey) else { return }
+
+        switch action {
+        case .tags:
+            guard annotation.isAuthor(currentUserId: viewModel.state.userId) else { return }
+            let selected = Set(annotation.tags.map({ $0.name }))
+            coordinatorDelegate?.showTagPicker(
+                libraryId: viewModel.state.library.identifier,
+                selected: selected,
+                userInterfaceStyle: viewModel.state.settings.appearanceMode.userInterfaceStyle,
+                picked: { [weak self] tags in
+                    self?.viewModel.process(action: .send(.setTags(key: annotation.key, tags: tags)))
+                }
+            )
+
+        case .options(let sender):
+            guard let sender else { return }
+            coordinatorDelegate?.showCellOptions(
+                for: annotation,
+                userId: viewModel.state.userId,
+                library: viewModel.state.library,
+                highlightFont: viewModel.state.textEditorFont,
+                sender: sender,
+                userInterfaceStyle: viewModel.state.interfaceStyle,
+                saveAction: { [weak viewModel] data, updateSubsequentLabels in
+                    guard let viewModel else { return }
+                    viewModel.process(action: .send(.updateAnnotationProperties(
+                        key: annotation.key,
+                        type: data.type,
+                        color: data.color,
+                        lineWidth: data.lineWidth,
+                        fontSize: data.fontSize ?? 0,
+                        pageLabel: data.pageLabel,
+                        updateSubsequentLabels: updateSubsequentLabels,
+                        highlightText: data.highlightText,
+                        higlightFont: data.highlightFont
+                    )))
+                },
+                deleteAction: { [weak self] in
+                    self?.viewModel.process(action: .send(.removeAnnotation(annotationKey)))
+                }
+            )
+
+        case .setComment(let comment):
+            viewModel.process(action: .send(.setComment(key: annotation.key, comment: comment)))
+
+        case .reloadHeight:
+            reconfigureSelectedCellIfAny()
+
+        case .setCommentActive(let isActive):
+            viewModel.process(action: .setCommentActive(isActive))
+
+        case .done:
+            break // Done button doesn't appear here
+        }
+
+        func reconfigureSelectedCellIfAny() {
+            guard let key = viewModel.state.selectedAnnotationKey else { return }
+            var snapshot = dataSource.snapshot()
+            guard snapshot.itemIdentifiers.contains(where: { $0 == key }) else { return }
+            updateQueue.async { [weak self] in
+                guard let self else { return }
+                snapshot.reconfigureItems([key])
+                dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+                    self?.focusSelectedCell()
+                }
+            }
+        }
+    }
+
+    private func updateUI(state: PDFAnnotationsState, animatedDifferences: Bool = true, completion: (() -> Void)? = nil) {
+        updateQueue.async { [weak self] in
+            guard let self else { return }
+            var snapshot = buildSnapshot(state: state)
+            if let keys = state.updatedAnnotationKeys?.filter({ snapshot.itemIdentifiers.contains($0) }), !keys.isEmpty {
+                snapshot.reconfigureItems(keys)
+            }
+            dataSource.apply(snapshot, animatingDifferences: animatedDifferences, completion: completion)
+        }
+
+        func buildSnapshot(state: PDFAnnotationsState) -> NSDiffableDataSourceSnapshot<Int, PDFReaderAnnotationKey> {
+            var itemsByPage: [Int: [PDFReaderAnnotationKey]] = [:]
+            for key in state.sortedKeys {
+                guard let annotation = state.annotation(for: key) else { continue }
+                itemsByPage[annotation.page, default: []].append(key)
+            }
+            var snapshot = NSDiffableDataSourceSnapshot<Int, PDFReaderAnnotationKey>()
+            for page in state.annotationPages {
+                if let items = itemsByPage[page], !items.isEmpty {
+                    snapshot.appendSections([page])
+                    snapshot.appendItems(items, toSection: page)
+                }
+            }
+            return snapshot
+        }
+    }
+
+    private func update(state: PDFAnnotationsState) {
+        if state.changes.contains(.appearance) {
+            previewHandler.setAppearance(.from(appearanceMode: state.settings.appearanceMode, interfaceStyle: state.interfaceStyle))
+            refreshVisibleAndPrefetchPreviews()
+        }
+        if state.changes.contains(.annotations) {
+            tableView.isHidden = (state.snapshotKeys ?? state.sortedKeys).isEmpty
+            toolbarContainer.isHidden = tableView.isHidden
+            emptyLabel.isHidden = !tableView.isHidden
+        }
+
+        let isVisible = parentDelegate?.isSidebarVisible ?? false
+        reloadIfNeeded(for: state, isVisible: isVisible) { [weak self] in
+            guard let self else { return }
+
+            if state.focusOnSelectionIfNeeded, let key = state.selectedAnnotationKey, let indexPath = dataSource.indexPath(for: key) {
+                tableView.selectRow(at: indexPath, animated: isVisible, scrollPosition: .middle)
+            }
+            if state.changes.contains(.sidebarEditingSelection) {
+                deleteBarButton?.isEnabled = state.deletionEnabled
+                mergeBarButton?.isEnabled = state.mergingEnabled
+            }
+            if state.changes.contains(.filter) || state.changes.contains(.annotations) || state.changes.contains(.sidebarEditing) {
+                setupToolbar(to: state)
+            }
+        }
+
+        /// Reloads tableView if needed, based on new state. Calls completion either when reloading finished or when there was no reload.
+        /// - parameter state: Current state.
+        /// - parameter completion: Called after reload was performed or even if there was no reload.
+        func reloadIfNeeded(for state: PDFAnnotationsState, isVisible: Bool, completion: @escaping () -> Void) {
+            if state.document.pageCount == 0 {
+                DDLogWarn("AnnotationsViewController: trying to reload empty document")
+                completion()
+                return
+            }
+
+            if state.changes.contains(.sidebarEditing) {
+                tableView.setEditing(state.sidebarEditingEnabled, animated: isVisible)
+            }
+
+            if state.changes.contains(.library) {
+                updateQueue.async { [weak self] in
+                    guard let self, !dataSource.snapshot().sectionIdentifiers.isEmpty else { return }
+                    var snapshot = dataSource.snapshot()
+                    snapshot.reloadSections(snapshot.sectionIdentifiers)
+                    dataSource.apply(snapshot, animatingDifferences: isVisible, completion: completion)
+                }
+                return
+            }
+
+            if state.changes.contains(.annotations) {
+                updateUI(state: state, animatedDifferences: isVisible, completion: completion)
+                return
+            }
+
+            if state.changes.contains(.appearance) && dataSource.snapshot().numberOfItems > 0 {
+                updateQueue.async { [weak self] in
+                    guard let self else { return }
+                    var snapshot = dataSource.snapshot()
+                    snapshot.reconfigureItems(snapshot.itemIdentifiers)
+                    dataSource.apply(snapshot, animatingDifferences: false, completion: completion)
+                }
+                return
+            }
+
+            if state.changes.contains(.selection) || state.changes.contains(.activeComment) {
+                var keys = state.updatedAnnotationKeys ?? []
+                if let key = state.selectedAnnotationKey, !keys.contains(key) {
+                    keys.append(key)
+                }
+                var snapshot = dataSource.snapshot()
+                // Filter any items identifiers not existing already in the snapshot. These will be added in a subsequent update.
+                keys = keys.filter({ snapshot.itemIdentifiers.contains($0) })
+                if !keys.isEmpty {
+                    updateQueue.async { [weak self] in
+                        guard let self else { return }
+                        snapshot.reconfigureItems(keys)
+                        dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+                            guard let self else { return }
+                            focusSelectedCell()
+                            completion()
+                        }
+                    }
+                    return
+                }
+            }
+
+            completion()
+        }
+    }
+
+    private func updatePreviewsIfVisible(for keys: Set<String>) {
+        let cells = tableView.visibleCells.compactMap({ $0 as? AnnotationCell }).filter({ keys.contains($0.key) })
+        for cell in cells {
+            cell.updatePreview(image: previewHandler.image(for: cell.key))
+        }
+    }
+
+    private func refreshVisibleAndPrefetchPreviews() {
+        guard isViewLoaded, view.window != nil, !view.isHidden, parentDelegate?.isSidebarVisible ?? false else { return }
+        let visibleIndexPaths = tableView.indexPathsForVisibleRows ?? []
+        guard !visibleIndexPaths.isEmpty else { return }
+        requestPreviews(at: visibleIndexPaths, notify: true)
+    }
+
+    private func requestPreviews(at indexPaths: [IndexPath], notify: Bool) {
+        let keys = indexPaths.compactMap({ dataSource.itemIdentifier(for: $0) })
+            .filter({ key in
+                guard let annotation = viewModel.state.annotation(for: key) else { return false }
+                switch annotation.type {
+                case .image, .ink, .freeText:
+                    return true
+
+                case .note, .highlight, .underline:
+                    return false
+                }
+            })
+            .map({ $0.key })
+        previewHandler.requestPreviews(keys: keys, notify: notify)
+    }
+
+    /// Scrolls to selected cell if it's not visible.
+    private func focusSelectedCell() {
+        guard !viewModel.state.sidebarEditingEnabled, let indexPath = tableView.indexPathForSelectedRow else { return }
+        let cellFrame = tableView.rectForRow(at: indexPath)
+        let visibleBottom = tableView.contentOffset.y + tableView.bounds.height
+        let safeAreaTop = view.safeAreaInsets.top
+        let visibleTop = tableView.contentOffset.y + safeAreaTop
+        // Scroll when the selected cell falls outside the currently visible portion of the table view.
+        if cellFrame.maxY > visibleBottom || cellFrame.minY < visibleTop {
+            // Scroll to top if cell is smaller than visible screen, so that it's fully visible, otherwise scroll to bottom.
+            let position: UITableView.ScrollPosition = cellFrame.height + safeAreaTop < tableView.bounds.height ? .top : .bottom
+            tableView.scrollToRow(at: indexPath, at: position, animated: false)
+        }
+    }
+
+    private func setup(cell: AnnotationCell, with annotation: PDFAnnotation, state: PDFAnnotationsState) {
+        let selected = annotation.key == state.selectedAnnotationKey?.key
+        let preview: UIImage?
+        let text: NSAttributedString?
+        let comment: AnnotationView.Comment?
+
+        // Annotation text
+        switch annotation.type {
+        case .highlight, .underline:
+            text = parentDelegate?.parseAndCacheIfNeededAttributedText(for: annotation, with: state.textFont)
+
+        case .note, .image, .ink, .freeText:
+            text = nil
+        }
+        // Annotation comment
+        switch annotation.type {
+        case .note, .highlight, .image, .underline:
+            let attributedString = parentDelegate?.parseAndCacheIfNeededAttributedComment(for: annotation) ?? NSAttributedString()
+            comment = .init(attributedString: attributedString, isActive: state.selectedAnnotationCommentActive)
+
+        case .ink, .freeText:
+            comment = nil
+        }
+        // Annotation preview
+        switch annotation.type {
+        case .image, .ink, .freeText:
+            preview = loadPreview(for: annotation)
+
+        case .note, .highlight, .underline:
+            preview = nil
+        }
+
+        guard let boundingBoxConverter, let pdfAnnotationsCoordinatorDelegate = coordinatorDelegate else { return }
+        let reconfiguringForSameAnnotation = annotation.key == cell.key
+        cell.setup(
+            with: annotation,
+            text: text,
+            comment: comment,
+            preview: preview,
+            selected: selected,
+            availableWidth: PDFReaderLayout.sidebarWidth,
+            document: state.document,
+            attachmentKey: state.key,
+            library: state.library,
+            isEditing: state.sidebarEditingEnabled,
+            currentUserId: viewModel.state.userId,
+            displayName: viewModel.state.displayName,
+            username: viewModel.state.username,
+            boundingBoxConverter: boundingBoxConverter,
+            pdfAnnotationsCoordinatorDelegate: pdfAnnotationsCoordinatorDelegate
+        )
+        if !reconfiguringForSameAnnotation {
+            let actionSubscription = cell.actionPublisher.subscribe(onNext: { [weak self] action in
+                self?.perform(action: action, annotationKey: annotation.readerKey)
+            })
+            _ = cell.disposeBag?.insert(actionSubscription)
+        }
+        // Otherwise, reconfigured cells do not have their prepareForReuse method called, so observing is already set up.
+
+        func loadPreview(for annotation: PDFAnnotation) -> UIImage? {
+            let preview = previewHandler.image(for: annotation.key)
+            if preview == nil {
+                previewHandler.requestPreviews(keys: [annotation.key], notify: true)
+            }
+            return preview
+        }
+    }
+
+    private func showFilterPopup(from barButton: UIBarButtonItem) {
+        var colors: Set<String> = []
+        var tags: Set<Tag> = []
+        if let databaseAnnotations = viewModel.state.databaseAnnotations {
+            for dbAnnotation in databaseAnnotations {
+                guard let annotation = PDFDatabaseAnnotation(item: dbAnnotation) else { continue }
+                colors.insert(annotation.color)
+                tags.formUnion(annotation.tags)
+            }
+        }
+        // We can safely ignore document annotation tags, as they are empty, so we just use their unique base colors.
+        let documentAnnotationColors = Set(viewModel.state.documentAnnotationUniqueBaseColors)
+
+        let sortedTags = tags.sorted(by: { lTag, rTag -> Bool in
+            if lTag.color.isEmpty == rTag.color.isEmpty {
+                return lTag.name.localizedCaseInsensitiveCompare(rTag.name) == .orderedAscending
+            }
+            if !lTag.color.isEmpty && rTag.color.isEmpty {
+                return true
+            }
+            return false
+        })
+        var sortedColors: [String] = []
+        AnnotationsConfig.allColors.forEach { color in
+            if colors.contains(color) || documentAnnotationColors.contains(color) {
+                sortedColors.append(color)
+            }
+        }
+        let defaultColors = Set(AnnotationsConfig.allColors)
+        let extraColors = documentAnnotationColors.subtracting(defaultColors).sorted()
+        sortedColors.append(contentsOf: extraColors)
+
+        coordinatorDelegate?.showFilterPopup(
+            from: barButton,
+            filter: viewModel.state.filter,
+            availableColors: sortedColors,
+            availableTags: sortedTags,
+            userInterfaceStyle: viewModel.state.settings.appearanceMode.userInterfaceStyle,
+            completed: { [weak self] filter in
+                self?.viewModel.process(action: .setFilter(filter))
+            }
+        )
+    }
+
+    // MARK: - Setups
+
+    private func setupViews() {
+        self.view.backgroundColor = .systemGray6
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.adjustsFontForContentSizeCategory = true
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.textColor = .systemGray
+        label.text = L10n.Pdf.Sidebar.noAnnotations
+        label.setContentHuggingPriority(.defaultLow, for: .vertical)
+        label.textAlignment = .center
+        view.addSubview(label)
+
+        let tableView = UITableView(frame: self.view.bounds, style: .plain)
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.delegate = self
+        tableView.prefetchDataSource = self
+        tableView.separatorStyle = .none
+        tableView.sectionHeaderHeight = 0
+        tableView.sectionFooterHeight = 0
+        tableView.sectionHeaderTopPadding = 0
+        tableView.backgroundColor = .systemGray6
+        tableView.backgroundView?.backgroundColor = .systemGray6
+        tableView.register(AnnotationCell.self, forCellReuseIdentifier: Self.cellId)
+        tableView.setEditing(viewModel.state.sidebarEditingEnabled, animated: false)
+        tableView.allowsMultipleSelectionDuringEditing = true
+        view.addSubview(tableView)
+
+        let toolbarContainer = UIView()
+        toolbarContainer.isHidden = !self.viewModel.state.library.metadataEditable
+        toolbarContainer.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(toolbarContainer)
+
+        let toolbar = UIToolbar()
+        toolbarContainer.backgroundColor = toolbar.backgroundColor
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        toolbarContainer.addSubview(toolbar)
+
+        let tableViewToToolbar = tableView.bottomAnchor.constraint(equalTo: toolbarContainer.topAnchor)
+        let tableViewToBottom = tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+
+        NSLayoutConstraint.activate([
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.bottomAnchor.constraint(equalTo: toolbarContainer.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            toolbarContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            toolbarContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            toolbarContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            toolbar.topAnchor.constraint(equalTo: toolbarContainer.topAnchor),
+            toolbar.leadingAnchor.constraint(equalTo: toolbarContainer.leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: toolbarContainer.trailingAnchor),
+            toolbar.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            label.topAnchor.constraint(equalTo: view.topAnchor),
+            label.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+
+        if viewModel.state.library.metadataEditable {
+            tableViewToToolbar.isActive = true
+        } else {
+            tableViewToBottom.isActive = true
+        }
+
+        self.toolbar = toolbar
+        self.toolbarContainer = toolbarContainer
+        self.tableView = tableView
+        self.tableViewToBottom = tableViewToBottom
+        self.tableViewToToolbar = tableViewToToolbar
+        emptyLabel = label
+    }
+
+    private func setupDataSource() {
+        dataSource = TableViewDiffableDataSource(tableView: tableView, cellProvider: { [weak self] tableView, indexPath, key in
+            let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellId, for: indexPath)
+
+            if let self, let cell = cell as? AnnotationCell, let annotation = viewModel.state.annotation(for: key) {
+                cell.contentView.backgroundColor = view.backgroundColor
+                setup(cell: cell, with: annotation, state: viewModel.state)
+            }
+
+            return cell
+        })
+
+        dataSource.canEditRow = { [weak self] indexPath in
+            guard let self = self, let key = dataSource.itemIdentifier(for: indexPath) else { return false }
+            switch key.type {
+            case .database:
+                return true
+
+            case .document:
+                return false
+            }
+        }
+
+        dataSource.commitEditingStyle = { [weak self] editingStyle, indexPath in
+            guard let self, !viewModel.state.sidebarEditingEnabled && editingStyle == .delete, let key = dataSource.itemIdentifier(for: indexPath), key.type == .database else { return }
+            viewModel.process(action: .send(.removeAnnotation(key)))
+        }
+    }
+
+    private func setupSearchController(text: String?) {
+        let insets = UIEdgeInsets(
+            top: PDFReaderLayout.searchBarVerticalInset,
+            left: PDFReaderLayout.annotationLayout.horizontalInset,
+            bottom: PDFReaderLayout.searchBarVerticalInset - PDFReaderLayout.cellSelectionLineWidth,
+            right: PDFReaderLayout.annotationLayout.horizontalInset
+        )
+
+        var frame = tableView.frame
+        frame.size.height = 65
+
+        let searchBar = SearchBar(frame: frame, insets: insets, cornerRadius: 10)
+        searchBar.set(text: text)
+        searchBar.text
+            .observe(on: MainScheduler.instance)
+            .skip(1)
+            .debounce(.milliseconds(150), scheduler: MainScheduler.instance)
+            .subscribe(onNext: { [weak self] text in
+                self?.viewModel.process(action: .setSearchTerm(text))
+            })
+            .disposed(by: disposeBag)
+        tableView.tableHeaderView = searchBar
+    }
+
+    private func setupToolbar(to state: PDFAnnotationsState) {
+        setupToolbar(
+            filterEnabled: (state.databaseAnnotations?.count ?? 0) > 1,
+            filterOn: (state.filter != nil),
+            editingEnabled: state.sidebarEditingEnabled,
+            deletionEnabled: state.deletionEnabled,
+            mergingEnabled: state.mergingEnabled
+        )
+    }
+
+    private func setupToolbar(filterEnabled: Bool, filterOn: Bool, editingEnabled: Bool, deletionEnabled: Bool, mergingEnabled: Bool) {
+        guard !toolbarContainer.isHidden else { return }
+
+        var items: [UIBarButtonItem] = [.flexibleSpace()]
+
+        if editingEnabled {
+            let merge = UIBarButtonItem(title: L10n.Pdf.AnnotationsSidebar.merge, style: .plain, target: nil, action: nil)
+            merge.isEnabled = mergingEnabled
+            merge.rx.tap
+                .subscribe(onNext: { [weak self] _ in
+                     guard let self, viewModel.state.sidebarEditingEnabled else { return }
+                     viewModel.process(action: .mergeSelectedAnnotations)
+                 })
+                 .disposed(by: disposeBag)
+            items.append(merge)
+            mergeBarButton = merge
+
+            let delete = UIBarButtonItem(title: L10n.delete, style: .plain, target: nil, action: nil)
+            delete.isEnabled = deletionEnabled
+            delete.rx.tap
+                .subscribe(onNext: { [weak self] _ in
+                    guard let self, viewModel.state.sidebarEditingEnabled else { return }
+                    viewModel.process(action: .removeSelectedAnnotations)
+                })
+                .disposed(by: disposeBag)
+            items.append(delete)
+            deleteBarButton = delete
+        } else if filterEnabled {
+            deleteBarButton = nil
+            mergeBarButton = nil
+
+            let filterImageName = filterOn ? "line.horizontal.3.decrease.circle.fill" : "line.horizontal.3.decrease.circle"
+            let filter = UIBarButtonItem(image: UIImage(systemName: filterImageName), style: .plain, target: nil, action: nil)
+            filter.rx.tap
+                .subscribe(onNext: { [weak self, weak filter]  _ in
+                    guard let self, let filter else { return }
+                    showFilterPopup(from: filter)
+                })
+                .disposed(by: disposeBag)
+            items.insert(filter, at: 0)
+        }
+
+        let select = UIBarButtonItem(title: (editingEnabled ? L10n.done : L10n.select), style: .plain, target: nil, action: nil)
+        select.rx.tap
+            .subscribe(onNext: { [weak self] _ in
+                self?.viewModel.process(action: .setSidebarEditingEnabled(!editingEnabled))
+            })
+            .disposed(by: disposeBag)
+        items.append(select)
+        
+        self.toolbar.items = items
+    }
+}
+
+extension PDFAnnotationsViewController: UITableViewDelegate, UITableViewDataSourcePrefetching {
+    func tableView(_ tableView: UITableView, prefetchRowsAt indexPaths: [IndexPath]) {
+        requestPreviews(at: indexPaths, notify: false)
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        guard let key = dataSource.itemIdentifier(for: indexPath) else { return }
+        if viewModel.state.sidebarEditingEnabled {
+            viewModel.process(action: .selectAnnotationDuringEditing(key))
+        } else {
+            viewModel.process(action: .setSelection(selectedAnnotationKey: key, selectionFromDocument: false))
+        }
+    }
+
+    func tableView(_ tableView: UITableView, didDeselectRowAt indexPath: IndexPath) {
+        guard viewModel.state.sidebarEditingEnabled, let key = dataSource.itemIdentifier(for: indexPath) else { return }
+        viewModel.process(action: .deselectAnnotationDuringEditing(key))
+    }
+
+    func tableView(_ tableView: UITableView, shouldBeginMultipleSelectionInteractionAt indexPath: IndexPath) -> Bool {
+        return tableView.isEditing
+    }
+}

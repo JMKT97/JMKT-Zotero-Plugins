@@ -1,0 +1,14 @@
+strings:
+  inputs: 
+    - Zotero/Assets/en.lproj/Localizable.strings
+    - Zotero/Assets/en.lproj/Localizable.stringsdict 
+  outputs:
+    templateName: structured-swift5
+    output: Zotero/Extensions/Localizable.swift
+xcassets:
+    inputs:
+      - Zotero/Assets/Images.xcassets
+      - Zotero/Assets/Colors.xcassets
+    outputs:
+      - templateName: swift5
+        output: Zotero/Extensions/Assets.swift

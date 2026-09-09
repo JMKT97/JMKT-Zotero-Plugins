@@ -1,0 +1,380 @@
+//
+//  UpdatableObject.swift
+//  Zotero
+//
+//  Created by Michal Rentka on 12/03/2019.
+//  Copyright © 2019 Corporation for Digital Scholarship. All rights reserved.
+//
+
+import Foundation
+
+import RealmSwift
+
+typealias UpdatableObject = Updatable&Object
+
+enum UpdatableChangeType: Int, PersistableEnum {
+    // Change made by sync, triggered by remote change
+    case sync = 0
+    // Change made locally by user
+    case user = 1
+    // Change made by sync, triggered by response from submission of local change to backend
+    case syncResponse = 2
+}
+
+protocol Updatable: AnyObject {
+    var changes: List<RObjectChange> { get set }
+    var changeType: UpdatableChangeType { get set }
+    var updateParameters: [String: Any]? { get }
+    var isChanged: Bool { get }
+
+    func deleteChanges(uuids: [String], database: Realm)
+    func deleteAllChanges(database: Realm)
+    func markAsChanged(in database: Realm)
+}
+
+extension Updatable {
+    func deleteChanges(uuids: [String], database: Realm) {
+        guard self.isChanged && !uuids.isEmpty else { return }
+        database.delete(self.changes.filter("identifier in %@", uuids))
+        self.changeType = .syncResponse
+    }
+
+    func deleteAllChanges(database: Realm) {
+        database.delete(self.changes)
+    }
+
+    var isChanged: Bool {
+        return !self.changes.isEmpty
+    }
+}
+
+extension RCollection: Updatable {
+    var updateParameters: [String: Any]? {
+        guard isChanged else { return nil }
+
+        var parameters: [String: Any] = ["key": key, "version": version]
+
+        let changes = changedFields
+        if changes.contains(.name) {
+            parameters["name"] = name
+        }
+        if changes.contains(.parent) {
+            if let key = parentKey {
+                parameters["parentCollection"] = key
+            } else {
+                parameters["parentCollection"] = false
+            }
+        }
+        if changes.contains(.trash) {
+            parameters["deleted"] = trash
+        }
+
+        return parameters
+    }
+
+    func markAsChanged(in database: Realm) {
+        var changes: RCollectionChanges = .name
+
+        self.changeType = .user
+        self.deleted = false
+        self.version = 0
+
+        if self.parentKey != nil {
+            changes.insert(.parent)
+        }
+
+        self.changes.append(RObjectChange.create(changes: changes))
+
+        self.items.forEach { item in
+            item.changes.append(RObjectChange.create(changes: RItemChanges.collections))
+            item.changeType = .user
+        }
+
+        if let libraryId = self.libraryId {
+            let children = database.objects(RCollection.self).filter(.parentKey(self.key, in: libraryId))
+            children.forEach { child in
+                child.markAsChanged(in: database)
+            }
+        }
+    }
+}
+
+extension RSearch: Updatable {
+    var updateParameters: [String: Any]? {
+        guard self.isChanged else { return nil }
+
+        var parameters: [String: Any] = ["key": self.key,
+                                         "version": self.version,
+                                         "dateModified": Formatter.iso8601.string(from: self.dateModified)]
+
+        let changes = self.changedFields
+        if changes.contains(.name) {
+            parameters["name"] = self.name
+        }
+        if changes.contains(.conditions) {
+            parameters["conditions"] = self.sortedConditionParameters
+        }
+
+        return parameters
+    }
+
+    private var sortedConditionParameters: [[String: Any]] {
+        return self.conditions.sorted(byKeyPath: "sortId").map({ $0.updateParameters })
+    }
+
+    func markAsChanged(in database: Realm) {
+        self.changes.append(RObjectChange.create(changes: RSearchChanges.all))
+        self.changeType = .user
+        self.deleted = false
+        self.version = 0
+    }
+}
+
+extension RCondition {
+    fileprivate var updateParameters: [String: Any] {
+        return ["condition": self.condition,
+                "operator": self.operator,
+                "value": self.value]
+    }
+}
+
+extension RItem: Updatable {
+    var updateParameters: [String: Any]? {
+        guard self.isChanged else { return nil }
+
+        var positionFieldChanged = false
+        var parameters: [String: Any] = ["key": self.key,
+                                         "version": self.version,
+                                         "dateModified": Formatter.iso8601.string(from: self.dateModified),
+                                         "dateAdded": Formatter.iso8601.string(from: self.dateAdded)]
+
+        let changes = self.changedFields
+        if changes.contains(.type) {
+            parameters["itemType"] = self.rawType
+        }
+        if changes.contains(.trash) {
+            parameters["deleted"] = self.trash
+        }
+        if changes.contains(.tags) {
+            parameters["tags"] = Array(self.tags.map({ ["tag": ($0.tag?.name ?? ""), "type": $0.type.rawValue] as [String: Any] }))
+        }
+        if changes.contains(.collections) {
+            parameters["collections"] = Array(self.collections.map({ $0.key }))
+        }
+        if changes.contains(.relations) {
+            var relations: [String: String] = [:]
+            self.relations.forEach { relation in
+                relations[relation.type] = relation.urlString
+            }
+            parameters["relations"] = relations
+        }
+        if changes.contains(.parent) {
+            parameters["parentItem"] = self.parent?.key ?? false
+        }
+        if changes.contains(.creators) {
+            parameters["creators"] = Array(self.creators.sorted(byKeyPath: "orderId").map({ $0.updateParameters }))
+        }
+        if changes.contains(.lastRead) && libraryId == .custom(.myLibrary) {
+            if let lastRead = lastRead.flatMap({ Int($0.timeIntervalSince1970) }) {
+                parameters["lastRead"] = lastRead
+            } else {
+                parameters["lastRead"] = ""
+            }
+        }
+        if changes.contains(.fields) {
+            for field in self.fields.filter("changed = true") {
+                if field.baseKey == FieldKeys.Item.Annotation.position {
+                    positionFieldChanged = true
+                    continue
+                }
+
+                switch field.key {
+                case FieldKeys.Item.Attachment.md5, FieldKeys.Item.Attachment.mtime:
+                    // Even though these field keys are set for the RItem object, we ignore them when submitting the attachment item itself,
+                    // but they are used in file upload
+                    parameters[field.key] = ""
+                    
+                default:
+                    parameters[field.key] = field.value
+                }
+            }
+        }
+        if self.rawType == ItemTypes.annotation && (changes.contains(.rects) || changes.contains(.paths) || positionFieldChanged),
+           let annotationType = self.fields.filter(.key(FieldKeys.Item.Annotation.type)).first.flatMap({ AnnotationType(rawValue: $0.value) }) {
+            parameters[FieldKeys.Item.Annotation.position] = self.createAnnotationPosition(for: annotationType, positionFields: self.fields.filter(.baseKey(FieldKeys.Item.Annotation.position)))
+        }
+        
+        return parameters
+    }
+
+    var mtimeAndHashParameters: [String: Any] {
+        var parameters: [String: Any] = ["key": self.key,
+                                         "version": self.version,
+                                         "dateModified": Formatter.iso8601.string(from: self.dateModified),
+                                         "dateAdded": Formatter.iso8601.string(from: self.dateAdded)]
+        if let md5 = self.fields.filter(.key(FieldKeys.Item.Attachment.md5)).first?.value {
+            parameters[FieldKeys.Item.Attachment.md5] = md5
+        }
+        if let mtime = self.fields.filter(.key(FieldKeys.Item.Attachment.mtime)).first.flatMap({ Int($0.value) }) {
+            parameters[FieldKeys.Item.Attachment.mtime] = mtime
+        }
+        return parameters
+    }
+
+    private func createAnnotationPosition(for type: AnnotationType, positionFields: Results<RItemField>) -> String {
+        var jsonData: [String: Any] = [:]
+
+        for field in positionFields {
+            if let value = Int(field.value) {
+                jsonData[field.key] = value
+            } else if let value = Double(field.value) {
+                jsonData[field.key] = value
+            } else if let data = field.value.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) {
+                jsonData[field.key] = json
+            } else {
+                jsonData[field.key] = field.value
+            }
+        }
+
+        switch type {
+        case .ink:
+            var apiPaths: [[Double]] = []
+            for path in self.paths.sorted(byKeyPath: "sortIndex") {
+                apiPaths.append(path.coordinates.sorted(byKeyPath: "sortIndex").map({ $0.value }))
+            }
+            jsonData[FieldKeys.Item.Annotation.Position.paths] = apiPaths
+            
+        case .highlight, .image, .note, .underline, .freeText:
+            var rectArray: [[Double]] = []
+            self.rects.forEach { rRect in
+                rectArray.append([rRect.minX, rRect.minY, rRect.maxX, rRect.maxY])
+            }
+            jsonData[FieldKeys.Item.Annotation.Position.rects] = rectArray
+        }
+
+        return (try? JSONSerialization.dataWithRoundedDecimals(withJSONObject: jsonData)).flatMap({ String(data: $0, encoding: .utf8) }) ?? ""
+    }
+
+    func deleteChanges(uuids: [String], database: Realm) {
+        database.delete(self.changes.filter("identifier in %@", uuids))
+        self.changeType = .syncResponse
+        self.fields.filter("changed = true").forEach { field in
+            field.changed = false
+        }
+    }
+
+    func deleteAllChanges(database: Realm) {
+        guard self.isChanged else { return }
+
+        database.delete(self.changes)
+        self.changeType = .syncResponse
+        self.fields.filter("changed = true").forEach { field in
+            field.changed = false
+        }
+    }
+
+    func markAsChanged(in database: Realm) {
+        self.changes.append(RObjectChange.create(changes: self.allChanges))
+        self.changeType = .user
+        self.deleted = false
+        self.version = 0
+
+        for field in self.fields {
+            guard !field.value.isEmpty else { continue }
+            field.changed = true
+        }
+
+        if self.rawType == ItemTypes.attachment && self.fields.filter(.key(FieldKeys.Item.Attachment.linkMode)).first?.value == LinkMode.importedFile.rawValue {
+            self.attachmentNeedsSync = true
+        }
+
+        self.children.forEach { child in
+            child.markAsChanged(in: database)
+        }
+    }
+
+    var allChanges: RItemChanges {
+        if self.rawType == ItemTypes.annotation {
+            var changes: RItemChanges = [.parent, .fields, .type, .tags]
+            if !self.rects.isEmpty {
+                changes.insert(.rects)
+            }
+            if !self.paths.isEmpty {
+                changes.insert(.paths)
+            }
+            return changes
+        }
+        
+        var changes: RItemChanges = [.type, .fields, .tags]
+        if !self.creators.isEmpty {
+            changes.insert(.creators)
+        }
+        if self.collections.isEmpty {
+            changes.insert(.collections)
+        }
+        if self.parent != nil {
+            changes.insert(.parent)
+        }
+        if self.trash {
+            changes.insert(.trash)
+        }
+        if !self.relations.isEmpty {
+            changes.insert(.relations)
+        }
+        if libraryId == .custom(.myLibrary) && lastRead != nil {
+            changes.insert(.lastRead)
+        }
+        return changes
+    }
+}
+
+extension RCreator {
+    fileprivate var updateParameters: [String: Any] {
+        var parameters: [String: Any] = ["creatorType": self.rawType]
+        if !self.name.isEmpty {
+            parameters["name"] = self.name
+        } else if !self.firstName.isEmpty || !self.lastName.isEmpty {
+            parameters["firstName"] = self.firstName
+            parameters["lastName"] = self.lastName
+        }
+        return parameters
+    }
+}
+
+extension RPageIndex: Updatable {
+    var updateParameters: [String: Any]? {
+        guard let libraryId else { return nil }
+
+        let value: Any
+        if let _value = Int(index) {
+            value = _value
+        } else if let _value = Double(index) {
+            value = Decimal(_value).rounded(to: 1)
+        } else {
+            value = index
+        }
+
+        return [SettingKeyParser.uid(fromKey: key, libraryId: libraryId, prefix: "lastPageIndex"): ["value": value]]
+    }
+
+    func markAsChanged(in database: Realm) {
+        self.changes.append(RObjectChange.create(changes: RPageIndexChanges.index))
+        self.changeType = .user
+        self.deleted = false
+        self.version = 0
+    }
+}
+
+extension RLastReadDate: Updatable {
+    var updateParameters: [String: Any]? {
+        guard let groupKey else { return nil }
+        return [SettingKeyParser.uid(fromKey: key, libraryId: .group(groupKey), prefix: "lastRead"): ["value": Int(date.timeIntervalSince1970)]]
+    }
+
+    func markAsChanged(in database: Realm) {
+        self.changes.append(RObjectChange.create(changes: RLastReadDateChanges.date))
+        self.changeType = .user
+        self.deleted = false
+        self.version = 0
+    }
+}

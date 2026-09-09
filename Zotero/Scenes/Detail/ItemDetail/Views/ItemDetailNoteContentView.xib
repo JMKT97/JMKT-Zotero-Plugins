@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.XIB" version="3.0" toolsVersion="20037" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES">
+    <device id="retina6_1" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="20020"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <objects>
+        <placeholder placeholderIdentifier="IBFilesOwner" id="-1" userLabel="File's Owner"/>
+        <placeholder placeholderIdentifier="IBFirstResponder" id="-2" customClass="UIResponder"/>
+        <view contentMode="scaleToFill" id="JPg-HG-fD2" customClass="ItemDetailNoteContentView" customModule="Zotero" customModuleProvider="target">
+            <rect key="frame" x="0.0" y="0.0" width="414" height="209"/>
+            <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+            <subviews>
+                <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="center" horizontalHuggingPriority="1000" verticalHuggingPriority="251" horizontalCompressionResistancePriority="1000" verticalCompressionResistancePriority="1000" image="Item types/note" translatesAutoresizingMaskIntoConstraints="NO" id="P06-z6-G6H">
+                    <rect key="frame" x="20" y="114.5" width="28" height="28"/>
+                    <constraints>
+                        <constraint firstAttribute="width" constant="28" id="KcI-jM-j1Y"/>
+                    </constraints>
+                </imageView>
+                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="100" verticalCompressionResistancePriority="1000" text="Label" textAlignment="natural" lineBreakMode="tailTruncation" numberOfLines="2" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="Zwi-h0-eqo">
+                    <rect key="frame" x="64" y="44" width="330" height="168.5"/>
+                    <fontDescription key="fontDescription" style="UICTFontTextStyleBody"/>
+                    <nil key="textColor"/>
+                    <nil key="highlightedColor"/>
+                </label>
+            </subviews>
+            <viewLayoutGuide key="safeArea" id="uQh-tn-06C"/>
+            <color key="backgroundColor" white="0.0" alpha="0.0" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+            <constraints>
+                <constraint firstItem="P06-z6-G6H" firstAttribute="leading" secondItem="JPg-HG-fD2" secondAttribute="leadingMargin" id="8f3-Xa-bit"/>
+                <constraint firstAttribute="bottomMargin" secondItem="Zwi-h0-eqo" secondAttribute="baseline" id="HS3-4q-pwe"/>
+                <constraint firstAttribute="trailingMargin" secondItem="Zwi-h0-eqo" secondAttribute="trailing" id="K44-Rq-qO3"/>
+                <constraint firstItem="Zwi-h0-eqo" firstAttribute="top" secondItem="JPg-HG-fD2" secondAttribute="topMargin" id="PiN-BU-Cmh"/>
+                <constraint firstItem="Zwi-h0-eqo" firstAttribute="centerY" secondItem="P06-z6-G6H" secondAttribute="centerY" id="mxo-XB-omG"/>
+                <constraint firstItem="Zwi-h0-eqo" firstAttribute="leading" secondItem="P06-z6-G6H" secondAttribute="trailing" constant="16" id="pqK-vf-w3h"/>
+            </constraints>
+            <freeformSimulatedSizeMetrics key="simulatedDestinationMetrics"/>
+            <connections>
+                <outlet property="label" destination="Zwi-h0-eqo" id="ecR-0x-6a8"/>
+                <outlet property="labelLeft" destination="pqK-vf-w3h" id="YdU-5A-epu"/>
+                <outlet property="labelTop" destination="PiN-BU-Cmh" id="L6X-ky-cO7"/>
+            </connections>
+            <point key="canvasLocation" x="-552" y="140"/>
+        </view>
+    </objects>
+    <resources>
+        <image name="Item types/note" width="23" height="28"/>
+    </resources>
+</document>

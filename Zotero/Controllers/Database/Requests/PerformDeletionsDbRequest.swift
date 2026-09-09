@@ -1,0 +1,195 @@
+//
+//  PerformDeletionsDbRequest.swift
+//  Zotero
+//
+//  Created by Michal Rentka on 21/02/2019.
+//  Copyright © 2019 Corporation for Digital Scholarship. All rights reserved.
+//
+
+import Foundation
+
+import RealmSwift
+
+struct PerformItemDeletionsDbRequest: DbResponseRequest {
+    enum ConflictResolutionMode {
+        /// Collect conflicting object keys and return them. Used initially on normal sync to see whether there are conflicts.
+        case resolveConflicts
+        /// On conflict just delete the object anyway. Used when user confirmed deletion of object.
+        case deleteConflicts
+        /// On conflict restore original object. Used on full sync when we don't want to remove skipped objects.
+        case restoreConflicts
+    }
+
+    typealias Response = [(String, String)]
+
+    let libraryId: LibraryIdentifier
+    let keys: [String]
+    let conflictMode: ConflictResolutionMode
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws -> [(String, String)] {
+        let objects = database.objects(RItem.self).filter(.keys(keys, in: libraryId))
+        var conflicts: [(String, String)] = []
+        let context = DeletionContext()
+
+        for object in objects {
+            guard !object.isInvalidated else { continue } // If object is invalidated it has already been removed by some parent before
+
+            switch conflictMode {
+            case .resolveConflicts:
+                if hasLocalChangesRequiringConflict(object) {
+                    // If remotely deleted item is changed locally, we need to show CR, so we return keys of such items
+                    conflicts.append((object.key, object.displayTitle))
+                    continue
+                }
+
+            case .restoreConflicts:
+                if hasLocalChangesRequiringConflict(object) {
+                    object.markAsChanged(in: database)
+                    continue
+                }
+
+            case .deleteConflicts:
+                break
+            }
+
+            context.delete(object, in: database)
+        }
+        context.cleanup(in: database)
+
+        return conflicts
+
+        func hasLocalChangesRequiringConflict(_ item: RItem) -> Bool {
+            if hasNonLastReadChanges(item) {
+                return true
+            }
+
+            for child in item.children {
+                guard !child.isInvalidated else { continue }
+                if hasLocalChangesRequiringConflict(child) {
+                    return true
+                }
+            }
+
+            return false
+
+            func hasNonLastReadChanges(_ item: RItem) -> Bool {
+                guard item.isChanged else { return false }
+
+                var changes = item.changedFields
+                changes.remove(.lastRead)
+                return !changes.isEmpty
+            }
+        }
+    }
+}
+
+struct PerformCollectionDeletionsDbRequest: DbRequest {
+    let libraryId: LibraryIdentifier
+    let keys: [String]
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws {
+        let objects = database.objects(RCollection.self).filter(.keys(keys, in: libraryId))
+        for object in objects {
+            guard !object.isInvalidated else { continue } // If object is invalidated it has already been removed by some parent before
+            if object.isChanged {
+                // If remotely deleted collection is changed locally, we want to keep the collection, so we mark that
+                // this collection is new and it will be reinserted by sync
+                object.markAsChanged(in: database)
+            } else {
+                database.delete(deletable: object)
+            }
+        }
+    }
+}
+
+struct PerformSearchDeletionsDbRequest: DbRequest {
+    let libraryId: LibraryIdentifier
+    let keys: [String]
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws {
+        let objects = database.objects(RSearch.self).filter(.keys(keys, in: libraryId))
+        for object in objects {
+            guard !object.isInvalidated else { continue }
+            if object.isChanged {
+                // If remotely deleted search is changed locally, we want to keep the search, so we mark that
+                // this search is new and it will be reinserted by sync
+                object.markAsChanged(in: database)
+            } else {
+                database.delete(deletable: object)
+            }
+        }
+    }
+}
+
+struct PerformTagDeletionsDbRequest: DbRequest {
+    let libraryId: LibraryIdentifier
+    let names: [String]
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws {
+        let tags = database.objects(RTag.self).filter(.names(names, in: libraryId))
+        for tag in tags {
+            database.delete(tag.tags)
+        }
+        database.delete(tags)
+    }
+}
+
+struct PerformPageIndexDeletionsDbRequest: DbRequest {
+    let libraryId: LibraryIdentifier
+    let keys: [String]
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws {
+        let objects = database.objects(RPageIndex.self).filter(.keys(keys, in: libraryId))
+        for object in objects {
+            guard !object.isInvalidated else { continue }
+            if object.isChanged {
+                // If remotely deleted pageIndex is changed locally, we want to keep the pageIndex, so we mark that
+                // this pageIndex is new and it will be reinserted by sync
+                object.markAsChanged(in: database)
+            } else {
+                database.delete(deletable: object)
+            }
+        }
+    }
+}
+
+struct PerformLastReadDeletionsDbRequest: DbRequest {
+    enum Error: Swift.Error {
+        case myLibraryNotSupported
+    }
+
+    let libraryId: LibraryIdentifier
+    let keys: [String]
+
+    var needsWrite: Bool { return true }
+
+    func process(in database: Realm) throws {
+        switch libraryId {
+        case .custom(.myLibrary):
+            throw Error.myLibraryNotSupported
+
+        case .group:
+            let objects = database.objects(RLastReadDate.self).filter(.keys(keys, in: libraryId))
+            for object in objects {
+                guard !object.isInvalidated else { continue }
+                if object.isChanged {
+                    // If remotely deleted lastRead is changed locally, we want to keep the lastRead, so we mark that
+                    // this lastRead is new and it will be reinserted by sync
+                    object.markAsChanged(in: database)
+                } else {
+                    database.delete(deletable: object)
+                }
+            }
+        }
+    }
+}

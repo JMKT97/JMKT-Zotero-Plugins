@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.XIB" version="3.0" toolsVersion="20037" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES">
+    <device id="retina6_1" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="20020"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="System colors in document resources" minToolsVersion="11.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <objects>
+        <placeholder placeholderIdentifier="IBFilesOwner" id="-1" userLabel="File's Owner"/>
+        <placeholder placeholderIdentifier="IBFirstResponder" id="-2" customClass="UIResponder"/>
+        <view contentMode="scaleToFill" id="KRZ-ce-w77" customClass="ItemDetailAttachmentContentView" customModule="Zotero" customModuleProvider="target">
+            <rect key="frame" x="0.0" y="0.0" width="414" height="348"/>
+            <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+            <subviews>
+                <view contentMode="scaleToFill" horizontalHuggingPriority="1000" verticalHuggingPriority="1000" translatesAutoresizingMaskIntoConstraints="NO" id="RAA-Dr-Cos" customClass="FileAttachmentView" customModule="Zotero" customModuleProvider="target">
+                    <rect key="frame" x="20" y="184" width="28" height="28"/>
+                    <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                    <constraints>
+                        <constraint firstAttribute="height" constant="28" placeholder="YES" id="b3P-hp-MnG"/>
+                        <constraint firstAttribute="width" constant="28" placeholder="YES" id="vwP-ib-3zs"/>
+                    </constraints>
+                </view>
+                <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="center" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="Item types/web-page" translatesAutoresizingMaskIntoConstraints="NO" id="C5w-yw-d8Z">
+                    <rect key="frame" x="20" y="184" width="28" height="28"/>
+                    <constraints>
+                        <constraint firstAttribute="width" constant="28" id="MmQ-fV-cI2"/>
+                        <constraint firstAttribute="height" constant="28" id="ogh-Vr-H7l"/>
+                    </constraints>
+                </imageView>
+                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" horizontalCompressionResistancePriority="250" verticalCompressionResistancePriority="1000" text="Label" textAlignment="natural" lineBreakMode="tailTruncation" numberOfLines="2" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="Yy5-No-Wsg">
+                    <rect key="frame" x="64" y="44" width="330" height="307.5"/>
+                    <fontDescription key="fontDescription" style="UICTFontTextStyleBody"/>
+                    <nil key="textColor"/>
+                    <nil key="highlightedColor"/>
+                </label>
+            </subviews>
+            <viewLayoutGuide key="safeArea" id="K8t-rg-FiT"/>
+            <color key="backgroundColor" white="0.0" alpha="0.0" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+            <constraints>
+                <constraint firstAttribute="bottomMargin" secondItem="Yy5-No-Wsg" secondAttribute="baseline" id="COC-sU-w83"/>
+                <constraint firstAttribute="trailingMargin" secondItem="Yy5-No-Wsg" secondAttribute="trailing" id="ENV-zo-lrr"/>
+                <constraint firstItem="Yy5-No-Wsg" firstAttribute="centerY" secondItem="RAA-Dr-Cos" secondAttribute="centerY" id="Ukb-dQ-2Yo"/>
+                <constraint firstItem="RAA-Dr-Cos" firstAttribute="leading" secondItem="KRZ-ce-w77" secondAttribute="leadingMargin" id="WEc-CY-sUJ"/>
+                <constraint firstItem="C5w-yw-d8Z" firstAttribute="centerY" secondItem="Yy5-No-Wsg" secondAttribute="centerY" id="X6k-UO-9EN"/>
+                <constraint firstItem="Yy5-No-Wsg" firstAttribute="top" secondItem="KRZ-ce-w77" secondAttribute="topMargin" id="cTA-eo-UUT"/>
+                <constraint firstItem="Yy5-No-Wsg" firstAttribute="leading" secondItem="RAA-Dr-Cos" secondAttribute="trailing" constant="16" id="rUz-U4-cbP"/>
+                <constraint firstItem="C5w-yw-d8Z" firstAttribute="leading" secondItem="RAA-Dr-Cos" secondAttribute="leading" id="shZ-Zi-PdE"/>
+            </constraints>
+            <freeformSimulatedSizeMetrics key="simulatedDestinationMetrics"/>
+            <connections>
+                <outlet property="attachmentIcon" destination="C5w-yw-d8Z" id="3Q7-cX-qoK"/>
+                <outlet property="fileView" destination="RAA-Dr-Cos" id="Mqe-rT-LZj"/>
+                <outlet property="label" destination="Yy5-No-Wsg" id="itS-mr-567"/>
+                <outlet property="labelLeft" destination="rUz-U4-cbP" id="zVl-9v-juW"/>
+                <outlet property="labelTop" destination="cTA-eo-UUT" id="Y3k-s1-dA6"/>
+            </connections>
+            <point key="canvasLocation" x="-675.36231884057975" y="318.08035714285711"/>
+        </view>
+    </objects>
+    <resources>
+        <image name="Item types/web-page" width="28" height="24"/>
+        <systemColor name="systemBackgroundColor">
+            <color white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+        </systemColor>
+    </resources>
+</document>

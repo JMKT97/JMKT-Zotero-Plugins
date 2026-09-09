@@ -1,0 +1,231 @@
+//
+//  LoginActionHandler.swift
+//  Zotero
+//
+//  Created by Michal Rentka on 03/02/2019.
+//  Copyright © 2019 Corporation for Digital Scholarship. All rights reserved.
+//
+
+import Foundation
+
+import Alamofire
+import CocoaLumberjackSwift
+import RxSwift
+
+struct LoginActionHandler: ViewModelActionHandler {
+    typealias Action = LoginAction
+    typealias State = LoginState
+
+    private let apiClient: ApiClient
+    private let sessionController: SessionController
+    private let webSocketController: LoginSessionWebSocketController
+    private let scheduler: ConcurrentDispatchQueueScheduler
+    private let disposeBag: DisposeBag
+    private let pollingDisposable: SerialDisposable
+    private let loginSocketMessageDisposable: SerialDisposable
+
+    init(apiClient: ApiClient, sessionController: SessionController) {
+        self.apiClient = apiClient
+        self.sessionController = sessionController
+        self.webSocketController = LoginSessionWebSocketController()
+        scheduler = ConcurrentDispatchQueueScheduler(qos: .userInitiated)
+        disposeBag = DisposeBag()
+        pollingDisposable = SerialDisposable()
+        loginSocketMessageDisposable = SerialDisposable()
+    }
+
+    func process(action: LoginAction, in viewModel: ViewModel<LoginActionHandler>) {
+        switch action {
+        case .login:
+            login(in: viewModel, kind: .login)
+
+        case .createAccount:
+            login(in: viewModel, kind: .createAccount)
+
+        case .cancelLoginSessionIfNeeded:
+            stopSessionMonitoring(for: viewModel.state.sessionToken)
+            cancelLoginSessionIfNeeded(in: viewModel)
+        }
+    }
+
+    private func login(in viewModel: ViewModel<LoginActionHandler>, kind: LoginState.RequestKind) {
+        guard viewModel.state.sessionStatus == .none else { return }
+        update(viewModel: viewModel) { state in
+            state.requestKind = kind
+            state.sessionStatus = .creating
+            state.sessionToken = nil
+            state.loginURL = nil
+            state.isLoading = true
+        }
+
+        let request = CreateLoginSessionRequest()
+        apiClient.send(request: request)
+            .observe(on: scheduler)
+            .flatMap { response, _ -> Single<(String, URL)> in
+                return Single.just((response.sessionToken, response.loginURL))
+            }
+            .observe(on: MainScheduler.instance)
+            .subscribe(onSuccess: { [weak viewModel] sessionToken, loginURL in
+                guard let viewModel else { return }
+                let finalURL: URL
+                switch kind {
+                case .login:
+                    finalURL = loginURL.appendingQueryItem(name: "app", value: "1") ?? loginURL
+
+                case .createAccount:
+                    let signupURL = URL(string: "https://www.zotero.org/user/register?app=1")!
+                    finalURL = signupURL.appendingQueryItem(name: "session", value: sessionToken) ?? signupURL
+                }
+
+                update(viewModel: viewModel) { state in
+                    state.sessionStatus = .checking
+                    state.sessionToken = sessionToken
+                    state.loginURL = finalURL
+                }
+                startStreaming(token: sessionToken, in: viewModel)
+                startSessionPolling(with: sessionToken, in: viewModel)
+            }, onFailure: { [weak viewModel] error in
+                DDLogError("LoginActionHandler: could not create login session - \(error)")
+                guard let viewModel else { return }
+                update(viewModel: viewModel) { state in
+                    state.sessionStatus = nil
+                    state.error = loginError(from: error)
+                    state.isLoading = false
+                }
+            })
+            .disposed(by: disposeBag)
+    }
+
+    private func startStreaming(token: String, in viewModel: ViewModel<LoginActionHandler>) {
+        let topic = LoginSessionWebSocketController.topic(for: token)
+        let messageDisposable = webSocketController.loginObservable
+            .observe(on: scheduler)
+            .filter({ $0.topic == topic })
+            .take(1)
+            .observe(on: MainScheduler.instance)
+            .subscribe(onNext: { [weak viewModel] response in
+                guard let viewModel, viewModel.state.sessionStatus == .checking else { return }
+                switch response {
+                case .complete(_, let userId, let username, let apiKey):
+                    update(viewModel: viewModel) { state in
+                        state.sessionStatus = .completed
+                    }
+                    stopSessionMonitoring(for: token)
+                    sessionController.register(userId: userId, username: username, displayName: "", apiToken: apiKey)
+
+                case .cancelled:
+                    stopSessionMonitoring(for: token)
+                    reset(viewModel: viewModel)
+                }
+            })
+
+        loginSocketMessageDisposable.disposable = messageDisposable
+        webSocketController.connect(sessionToken: token)
+    }
+
+    private func startSessionPolling(with token: String, in viewModel: ViewModel<LoginActionHandler>) {
+        let disposable = Observable<Int>
+            .interval(.seconds(3), scheduler: MainScheduler.instance)
+            .flatMapLatest { _ in
+                apiClient.send(request: CheckLoginSessionRequest(token: token))
+                    .asObservable()
+            }
+            .observe(on: MainScheduler.instance)
+            .subscribe(onNext: { [weak viewModel] response, _ in
+                guard let viewModel else { return }
+                switch response.status {
+                case .pending:
+                    break
+
+                case .completed(let apiKey, let userId, let username):
+                    if viewModel.state.sessionStatus == .checking {
+                        update(viewModel: viewModel) { state in
+                            state.sessionStatus = .completed
+                        }
+                        stopSessionMonitoring(for: token)
+                        sessionController.register(userId: userId, username: username, displayName: "", apiToken: apiKey)
+                    }
+
+                case .cancelled:
+                    stopSessionMonitoring(for: token)
+                    reset(viewModel: viewModel)
+                }
+            }, onError: { [weak viewModel] error in
+                DDLogError("LoginActionHandler: could not poll login session - \(error)")
+                guard let viewModel else { return }
+                update(viewModel: viewModel) { state in
+                    state.sessionStatus = nil
+                    state.error = loginError(from: error)
+                    state.isLoading = false
+                }
+                stopSessionMonitoring(for: token)
+            })
+
+        pollingDisposable.disposable = disposable
+    }
+
+    private func stopSessionMonitoring(for token: String?) {
+        pollingDisposable.disposable = Disposables.create()
+        loginSocketMessageDisposable.disposable = Disposables.create()
+
+        webSocketController.disconnect(sessionToken: token)
+    }
+
+    private func cancelLoginSessionIfNeeded(in viewModel: ViewModel<LoginActionHandler>) {
+        guard viewModel.state.sessionStatus == .checking else { return }
+        guard let token = viewModel.state.sessionToken else {
+            reset(viewModel: viewModel)
+            return
+        }
+        update(viewModel: viewModel) { state in
+            state.sessionStatus = .cancelling
+        }
+        apiClient.send(request: CancelLoginSessionRequest(token: token))
+            .observe(on: MainScheduler.instance)
+            .subscribe(onSuccess: { [weak viewModel] _ in
+                DDLogInfo("LoginActionHandler: cancelled session")
+                guard let viewModel else { return }
+                reset(viewModel: viewModel)
+            }, onFailure: { [weak viewModel] error in
+                DDLogWarn("LoginActionHandler: could not cancel session - \(loginError(from: error))")
+                guard let viewModel else { return }
+                reset(viewModel: viewModel)
+            })
+            .disposed(by: disposeBag)
+    }
+
+    private func reset(viewModel: ViewModel<LoginActionHandler>) {
+        update(viewModel: viewModel) { state in
+            state.sessionStatus = nil
+            state.sessionToken = nil
+            state.loginURL = nil
+            state.requestKind = nil
+            state.isLoading = false
+        }
+    }
+
+    private func loginError(from error: Error) -> LoginError {
+        if let afError = error as? AFResponseError {
+            switch afError.error {
+            case .responseValidationFailed(let reason):
+                switch reason {
+                case .unacceptableStatusCode:
+                    return .serverError(afError.response)
+
+                default:
+                    return afError.response.isEmpty ? .unknown(error) : .serverError(afError.response)
+                }
+
+            case .sessionTaskFailed(let error):
+                return .serverError(error.localizedDescription)
+
+            default:
+                return afError.response.isEmpty ? .unknown(error) : .serverError(afError.response)
+            }
+        } else if let error = error as? LoginError {
+            return error
+        } else {
+            return .unknown(error)
+        }
+    }
+}
