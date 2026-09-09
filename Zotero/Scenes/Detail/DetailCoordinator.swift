@@ -331,6 +331,9 @@ final class DetailCoordinator: Coordinator {
         navigationController.present(controller, animated: true, completion: nil)
     }
 
+    // Native Viewer Redirect: always open PDFs in Apple's Quick Look/Markup, never PSPDFKit's reader.
+    // `page`, `preselectedAnnotationKey`, and `previewRects` exist for PSPDFKit's jump-to-annotation-location
+    // feature, which has no Quick Look equivalent, so they're accepted but unused.
     func createPDFController(
         key: String,
         parentKey: String?,
@@ -340,24 +343,9 @@ final class DetailCoordinator: Coordinator {
         preselectedAnnotationKey: String? = nil,
         previewRects: [CGRect]? = nil
     ) -> NavigationViewController {
-        let navigationController = NavigationViewController()
+        let previewController = NativeViewerPreviewController(url: url, title: url.lastPathComponent)
+        let navigationController = NavigationViewController(rootViewController: previewController)
         navigationController.modalPresentationStyle = .fullScreen
-
-        let coordinator = PDFCoordinator(
-            key: key,
-            parentKey: parentKey,
-            libraryId: libraryId,
-            url: url,
-            page: page,
-            preselectedAnnotationKey: preselectedAnnotationKey,
-            previewRects: previewRects,
-            navigationController: navigationController,
-            controllers: controllers
-        )
-        coordinator.parentCoordinator = self
-        childCoordinators.append(coordinator)
-        coordinator.start(animated: false)
-
         return navigationController
     }
 
