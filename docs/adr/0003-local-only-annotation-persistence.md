@@ -1,0 +1,5 @@
+# Scope v1 to local-only annotation persistence, not Zotero cloud sync
+
+Native Markup changes a PDF's own file content on disk. Zotero's app has no reason to notice that change unless something explicitly detects it and re-uploads the modified file through Zotero's sync engine — a real feature, not a side effect of the Native Viewer Redirect itself. The user was offered this as an explicit choice (local-only vs. building that re-upload hook now) and chose local-only: they access their library from one device today, have no interest in routing annotated files through Zotero's own cloud storage, and would rather set up their own self-hosted Zotero sync solution later, which is separate future work and out of scope for this effort.
+
+This keeps the Redirect a small, contained change (open the existing local file in place) rather than one that also has to understand and safely drive Zotero's sync engine. The trade-off: if the user starts reading from a second device before a sync story exists, annotations made via Native Markup won't appear there — this is accepted for now, not solved.
