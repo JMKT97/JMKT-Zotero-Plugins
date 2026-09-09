@@ -1,0 +1,131 @@
+name: Build Fork IPA
+
+# Runs on every push to main, including the force-pushes from the upstream-rebase
+# workflow (ADR-0004) - each one produces a fresh .ipa + AltSource manifest.
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: build-fork-ipa
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build unsigned IPA for SideStore
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install SwiftGen
+        run: which swiftgen || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install swiftgen
+
+      - name: Install SwiftLint
+        run: which swiftlint || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install swiftlint
+
+      - name: Select Xcode 26.5
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.5"
+
+      - name: Cache ONNX Runtime
+        uses: actions/cache@v4
+        with:
+          path: Dependencies/ONNXRuntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('scripts/fetch_onnxruntime.sh') }}
+
+      - name: Prepare ONNX Runtime
+        run: scripts/fetch_onnxruntime.sh
+
+      - name: Read version from project settings
+        id: version
+        run: |
+          SETTINGS=$(xcodebuild -project Zotero.xcodeproj -scheme Zotero -showBuildSettings 2>/dev/null)
+          SHORT_VERSION=$(echo "$SETTINGS" | awk -F'= ' '/ MARKETING_VERSION /{print $2; exit}')
+          BUILD_NUMBER=$(echo "$SETTINGS" | awk -F'= ' '/ CURRENT_PROJECT_VERSION /{print $2; exit}')
+          echo "short_version=${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # No Apple Developer account and no PSPDFKit license key are configured, by design
+      # (see SPEC.md). This builds a plain unsigned .app for a generic iOS device - not
+      # an archive/export, which would require a signing identity. SideStore performs
+      # the actual free/Personal-Team signing step itself at install time.
+      - name: Build unsigned .app
+        run: |
+          xcodebuild build \
+            -project Zotero.xcodeproj \
+            -scheme Zotero \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package .ipa
+        id: package
+        run: |
+          set -euo pipefail
+          APP_PATH="build/Build/Products/Release-iphoneos/Zotero.app"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/Info.plist")
+
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+
+          IPA_NAME="Zotero-fork-${{ steps.version.outputs.short_version }}-${{ steps.version.outputs.build_number }}.ipa"
+          zip -qr "$IPA_NAME" Payload
+          SIZE=$(stat -f%z "$IPA_NAME")
+
+          echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=${BUNDLE_ID}" >> "$GITHUB_OUTPUT"
+          echo "size=${SIZE}" >> "$GITHUB_OUTPUT"
+
+      # AltSource format for SideStore - deliberately NOT the AltStore/PAL format
+      # (no sha256, no marketplaceID/buildVersion). See
+      # wayfinder/tickets/sidestore-source-format-research.md.
+      - name: Generate AltSource manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          TAG="build-${{ github.run_number }}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${{ steps.package.outputs.ipa_name }}"
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          cat > source.json <<EOF
+          {
+            "name": "JMKT's Zotero Fork",
+            "identifier": "io.github.jmkt97.zotero-fork",
+            "apps": [
+              {
+                "bundleIdentifier": "${{ steps.package.outputs.bundle_id }}",
+                "versions": [
+                  {
+                    "version": "${{ steps.version.outputs.short_version }}",
+                    "date": "${DATE}",
+                    "downloadURL": "${DOWNLOAD_URL}",
+                    "size": ${{ steps.package.outputs.size }}
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.manifest.outputs.tag }}
+          name: "Build ${{ github.run_number }} (${{ steps.version.outputs.short_version }})"
+          make_latest: true
+          files: |
+            ${{ steps.package.outputs.ipa_name }}
+            source.json
