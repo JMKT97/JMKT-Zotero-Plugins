@@ -54,10 +54,14 @@ jobs:
           echo "build_number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
 
       # No Apple Developer account and no PSPDFKit license key are configured, by design
-      # (see SPEC.md). This builds a plain unsigned .app for a generic iOS device - not
-      # an archive/export, which would require a signing identity. SideStore performs
-      # the actual free/Personal-Team signing step itself at install time.
-      - name: Build unsigned .app
+      # (see SPEC.md). The project's own build settings hardcode Automatic signing tied
+      # to Zotero's own team (DEVELOPMENT_TEAM = 8LAYR367YV), which we have no access to,
+      # and a truly empty CODE_SIGN_IDENTITY breaks the project's own "Fix Code Signing"
+      # script phase (it unconditionally re-codesigns embedded frameworks and fails with
+      # an empty identity). Ad-hoc signing ("-") needs no certificate or team and satisfies
+      # both. SideStore replaces this signature with real free/Personal-Team signing at
+      # install time, so it only needs to get us past this build.
+      - name: Build ad-hoc-signed .app
         run: |
           xcodebuild build \
             -project Zotero.xcodeproj \
@@ -65,9 +69,12 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
 
       - name: Package .ipa
         id: package
