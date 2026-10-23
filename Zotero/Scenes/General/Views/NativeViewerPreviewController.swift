@@ -17,6 +17,7 @@ final class NativeViewerPreviewController: QLPreviewController {
         self.disposeBag = DisposeBag()
         super.init(nibName: nil, bundle: nil)
         self.dataSource = self
+        self.delegate = self
         self.title = title
     }
 
@@ -49,6 +50,14 @@ extension NativeViewerPreviewController: QLPreviewControllerDataSource {
 
     func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
         return previewItem
+    }
+}
+
+extension NativeViewerPreviewController: QLPreviewControllerDelegate {
+    // Without this Quick Look defaults to .disabled and Markup is unavailable. .updateContents
+    // writes Native Markup straight back into the same PDF file (SPEC.md section 3, ADR-0003).
+    func previewController(_ controller: QLPreviewController, editingModeFor previewItem: QLPreviewItem) -> QLPreviewItemEditingMode {
+        return .updateContents
     }
 }
 
