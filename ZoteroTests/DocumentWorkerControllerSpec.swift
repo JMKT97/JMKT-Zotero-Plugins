@@ -592,13 +592,14 @@ final class DocumentWorkerControllerSpec: QuickSpec {
                 }
 
                 for fixture in defaultRuntimeStructuredTextFixtures {
-                    // JMKT FORK: skipped on purpose. This default-runtime (WebView) PDF case times out
+                    // JMKT FORK: skipped on purpose. The default-runtime (WebView) PDF cases time out
                     // on GitHub's macOS runners (WebKit GPU/web processes get killed, then "missing
-                    // materialized SDTPack data"), so "Run tests" fails on every push. It is unrelated
+                    // materialized SDTPack data"), so "Run tests" fails on every push. Skipping a
+                    // single fixture just moved the failure to the next one, so all PDFs are skipped. It is unrelated
                     // to the Native Viewer Redirect (document text extraction doesn't touch PSPDFKit
                     // or Quick Look). The JavaScriptCore and explicit WebView PDF variants below still
                     // run. On a rebase onto upstream, keep this skip unless the test passes in CI.
-                    if fixture.description == "PDF" {
+                    if fixture.fileExtension == "pdf" {
                         xit("can extract structured document text for \(fixture.description)") {}
                         continue
                     }
